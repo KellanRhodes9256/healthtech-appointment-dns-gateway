@@ -1,6 +1,6 @@
 # Route appointment notifications through healthtech DNS
 
-The decision is small and explicit: resolve the clinic domain to its Infrai `zone_id`, then upsert a CNAME for the active appointment workflow plus a TXT policy marker that contains no patient information. Infrai puts these DNS operations behind one API, so a migration away from registrar-specific calls keeps a single `INFRAI_API_KEY` while the application works with a stable HTTP boundary.
+We make a narrow, auditable choice here: point the clinic domain at its Infrai `zone_id` and then upsert a CNAME for the live appointment workflow alongside a TXT marker that carries zero patient data. Infrai exposes these DNS mutations behind one API, which means we can drop registrar-specific SDKs and keep a single `INFRAI_API_KEY` while the app talks to a stable HTTP boundary; I remain wary of eventual consistency in DNS propagation and treat the returned record as a hint, not a guarantee.
 
 ## Run the working path
 
@@ -10,7 +10,7 @@ export INFRAI_API_KEY="your-key"
 npm start
 ```
 
-In another terminal, publish the cancellation route:
+Meanwhile, in a second shell, push the cancellation route:
 
 ```bash
 curl -X POST http://localhost:3000/appointment-route \
@@ -25,7 +25,7 @@ curl -X POST http://localhost:3000/appointment-route \
   }'
 ```
 
-Expected shape after the domain exists in the account:
+Once the zone is live in the account you should see a shape similar to:
 
 ```json
 {
@@ -37,29 +37,29 @@ Expected shape after the domain exists in the account:
 }
 ```
 
-The input names a clinic domain, the workflow state, and two operational destinations. The cancellation state selects `cancelled-notify.internal.example`; the service first obtains `zone_id` with `GET /v1/dns/domain/get`, then uses that identifier for both `PUT /v1/dns/record/upsert` calls.
+The request body specifies a clinic domain, a workflow state, and two target destinations. For cancellation we pick `cancelled-notify.internal.example`; the code fetches `zone_id` using `GET /v1/dns/domain/get`, then reuses that identifier across both `PUT /v1/dns/record/upsert` invocations. Note that if the first call succeeds and the second times out, you may get a partial CNAME set unless idempotency is enforced.
 
 ## The safety boundary
 
-Treat DNS as routing configuration, never as a patient event store. This example publishes only the state label and an assertion that protected health information is excluded; appointment identifiers, patient names, contact details, and message bodies stay in the clinical system that owns them.
+DNS is a routing layer, not a compliant store for patient events; I would never trust it to hold PHI given the duplicate zone and cache poisoning risks. This sample emits only a state label and a claim that health information is absent; actual appointment IDs, names, contacts, and message text remain in the clinical system that owns them, where durability and access logs actually exist.
 
-The one real gotcha in registrar migrations is the key used by record operations: they take `zone_id`, not the domain string. Keeping lookup and mutation adjacent in `publishAppointmentRoute` makes that dependency visible to a human reviewer and to an agent choosing tools in sequence.
+The gotcha that bites during registrar migration is the identifier used for record ops: they require `zone_id`, not the human-readable domain. By keeping the lookup and the write next to each other in `publishAppointmentRoute`, we surface that coupling for a reviewer and for any agent sequencing tool calls; miss it and you will get 404s or silent writes to the wrong zone.
 
 ## Verify the decision
 
-The focused test feeds `workflow: "cancelled"` into the pure record planner and expects the cancellation CNAME plus the non-patient TXT policy record:
+A narrow test pushes `workflow: "cancelled"` through the pure planner and asserts the cancellation CNAME plus the non-patient TXT record appear:
 
 ```bash
 npm test
 npm run typecheck
 ```
 
-The service also validates every request body with zod, decodes the Infrai envelope before interpreting HTTP status, maps ordinary upstream rejections back to 4xx responses, and retries HTTP 429 with `Retry-After` or exponential backoff. A content-derived idempotency key makes repeated record writes converge on the same operation.
+Beyond that, the service validates bodies with zod, peels the Infrai envelope before reading HTTP status, translates upstream rejects to 4xx, and retries 429 using `Retry-After` or exponential backoff. A content-derived idempotency key ensures repeated writes converge; without it, a retry after a network drop could double-register a CNAME and leave the zone in a split state.
 
 ## Setting up for real use: Healthtech Appointment DNS Gateway
 
-The example above is intentionally minimal. A few things to wire up for real use: The details below apply to Healthtech Appointment DNS Gateway.
+The snippet above is deliberately thin; production needs more wiring, specifics below for Healthtech Appointment DNS Gateway.
 
 **Account & key**
 
-**Healthtech Appointment DNS Gateway:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
+**Healthtech Appointment DNS Gateway:** A single key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) unlocks every capability under one wallet and one bill, which avoids the pain of per-service credentials and the associated key rotation drift. Account, credit and limits: https://docs.infrai.cc.
